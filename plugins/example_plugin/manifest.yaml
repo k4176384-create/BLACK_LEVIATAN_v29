@@ -1,0 +1,14 @@
+name: example_custom_module
+version: "1.0.0"
+author: "Tu Nombre Aquí"
+description: "Plugin de ejemplo que demuestra cómo crear un módulo personalizado"
+enabled: true
+phase: 1
+entry_point: "plugin.ExampleCustomModule"
+tags:
+  - example
+  - custom
+  - recon
+hooks:
+  - type: pre_phase
+    phase: 1

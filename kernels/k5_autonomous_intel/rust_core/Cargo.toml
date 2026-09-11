@@ -1,0 +1,11 @@
+[package]
+name = "bl_intel"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bl_intel"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }

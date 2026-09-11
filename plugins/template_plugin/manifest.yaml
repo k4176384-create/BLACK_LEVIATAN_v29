@@ -1,0 +1,8 @@
+name: mi_nuevo_modulo
+version: "1.0.0"
+author: "Luis Sánchez"
+description: "Descripción de lo que hace este módulo"
+enabled: true
+phase: 1
+tags:
+  - custom

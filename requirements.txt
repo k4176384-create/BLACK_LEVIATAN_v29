@@ -1,0 +1,53 @@
+# ─── BLACK LEVIATAN v29 — Requirements ───────────────────────────────────────
+# Instalar: pip install -r requirements.txt --break-system-packages
+# O en .venv: pip install -r requirements.txt
+
+# ── Core async / HTTP ─────────────────────────────────────────────────────────
+aiohttp>=3.9.0
+aiofiles>=23.2.1
+
+# ── Config / Env ──────────────────────────────────────────────────────────────
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# ── DNS ───────────────────────────────────────────────────────────────────────
+dnspython>=2.6.0
+
+# ── WHOIS ─────────────────────────────────────────────────────────────────────
+python-whois>=0.9.3
+
+# ── TUI / Dashboard ───────────────────────────────────────────────────────────
+rich>=13.7.0
+textual>=0.50.0
+
+# ── Graph / Correlation (K2) ──────────────────────────────────────────────────
+networkx>=3.2.0
+
+# ── Database (K3) ─────────────────────────────────────────────────────────────
+duckdb>=0.10.0
+
+# ── Web scraping (K1 fallback) ────────────────────────────────────────────────
+playwright>=1.43.0
+beautifulsoup4>=4.12.0
+lxml>=5.1.0
+
+# ── TLS analysis ──────────────────────────────────────────────────────────────
+cryptography>=42.0.0
+
+# ── Tor evasion (K6) ─────────────────────────────────────────────────────────
+stem>=1.8.2
+
+# ── ML / Intel (K5) — OPCIONAL ───────────────────────────────────────────────
+# fasttext>=0.9.3      # requiere compilación — instalar manualmente si se necesita
+
+# ── Email / OSINT opcionales ──────────────────────────────────────────────────
+# holehe>=1.4.0        # pip install holehe
+
+# ── Plugin YAML ───────────────────────────────────────────────────────────────
+PyYAML>=6.0.1
+
+# ── Exporters ─────────────────────────────────────────────────────────────────
+# Para PDF export (opcional):
+# weasyprint>=60.0
+# Para STIX/SARIF: sólo stdlib + json (ya incluido)
