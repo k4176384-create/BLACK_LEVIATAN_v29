@@ -106,42 +106,63 @@ class CircuitBreaker:
 
 
 # ──────────────────────────────────────────────
-# Backpressure Manager
+# Backpressure Manager con Retry-After y per-host limiters
 # ──────────────────────────────────────────────
 class BackpressureManager:
     """
-    Controla la velocidad de envío de requests según señales del sistema.
-    Usa un algoritmo de ventana deslizante para detectar rate limits.
+    Controla velocidad según 429/403/5xx + Retry-After + per-host tracking.
     """
     def __init__(self, base_delay: float = 1.0, jitter: float = 0.3) -> None:
         self._base_delay   = base_delay
         self._jitter       = jitter
         self._current_mult = 1.0
-        self._window:      list[tuple[float, int]] = []   # (timestamp, status_code)
+        self._window:      list[tuple[float, int, Optional[str]]] = []   # (ts, code, host)
         self._window_size  = 100
+        self._host_delays: dict[str, float] = {}  # host -> next_allowed_ts
+        self._retry_after_until: float = 0.0
 
-    def record_response(self, status_code: int) -> None:
-        self._window.append((time.time(), status_code))
+    def record_response(self, status_code: int, host: str | None = None, retry_after: float | None = None) -> None:
+        self._window.append((time.time(), status_code, host))
         if len(self._window) > self._window_size:
             self._window.pop(0)
+        if retry_after is not None and retry_after > 0:
+            # Respetar Retry-After header
+            self._retry_after_until = max(self._retry_after_until, time.time() + retry_after)
+            log.info("Vigilante respetando Retry-After: %.1fs para host %s", retry_after, host or "?")
+        if host and status_code in (429, 503, 403):
+            # Penalizar host específico
+            self._host_delays[host] = time.time() + self._base_delay * self._current_mult * 2
         self._adjust_multiplier()
 
     def _adjust_multiplier(self) -> None:
         if len(self._window) < 10:
             return
-        recent = [s for _, s in self._window[-20:]]
+        recent = [s for _, s, _ in self._window[-20:]]
         rate_limit_ratio = recent.count(429) / len(recent)
         forbidden_ratio  = recent.count(403) / len(recent)
+        server_err_ratio = sum(1 for c in recent if 500 <= c < 600) / len(recent)
+        # timeout=0 ya tratado como 5xx por caller
 
         if rate_limit_ratio > 0.3:
             self._current_mult = min(8.0, self._current_mult * 2.0)
         elif forbidden_ratio > 0.2:
             self._current_mult = min(4.0, self._current_mult * 1.5)
-        elif rate_limit_ratio < 0.05 and forbidden_ratio < 0.05:
+        elif server_err_ratio > 0.3:
+            self._current_mult = min(4.0, self._current_mult * 1.4)
+        elif rate_limit_ratio < 0.05 and forbidden_ratio < 0.05 and server_err_ratio < 0.05:
             self._current_mult = max(1.0, self._current_mult * 0.9)
 
-    async def wait(self) -> None:
+    async def wait(self, host: str | None = None) -> None:
         import random
+        # Respetar Retry-After global
+        now = time.time()
+        if now < self._retry_after_until:
+            wait_ra = self._retry_after_until - now
+            log.debug("Backpressure: esperando Retry-After %.1fs", wait_ra)
+            await asyncio.sleep(wait_ra)
+        # Respetar per-host delay
+        if host and host in self._host_delays and time.time() < self._host_delays[host]:
+            await asyncio.sleep(self._host_delays[host] - time.time())
         delay = self._base_delay * self._current_mult
         jitter = delay * self._jitter * (random.random() * 2 - 1)
         await asyncio.sleep(max(0.1, delay + jitter))
@@ -149,6 +170,18 @@ class BackpressureManager:
     @property
     def current_delay(self) -> float:
         return self._base_delay * self._current_mult
+
+    def parse_retry_after(self, headers: dict) -> float | None:
+        """Parsea Retry-After: segundos o HTTP-date."""
+        ra = headers.get("Retry-After") or headers.get("retry-after") or headers.get("retry_after")
+        if ra is None: return None
+        try: return float(ra)
+        except:
+            try:
+                from email.utils import parsedate_to_datetime
+                dt = parsedate_to_datetime(str(ra))
+                return max(0, (dt.timestamp() - time.time()))
+            except: return None
 
 
 # ──────────────────────────────────────────────
@@ -208,7 +241,7 @@ class VigilanteV2:
         cb = self.get_circuit_breaker(module_name)
         return not cb.is_open
 
-    async def gate(self, module_name: str) -> bool:
+    async def gate(self, module_name: str, host: str | None = None) -> bool:
         """
         Punto de entrada para módulos antes de hacer una petición.
         Returns False si el módulo debe esperar/abortar.
@@ -216,18 +249,19 @@ class VigilanteV2:
         cb = self.get_circuit_breaker(module_name)
         if cb.is_open:
             return False
-        await self._bpm.wait()
+        await self._bpm.wait(host)
         return True
 
-    def record_success(self, module_name: str, status_code: int) -> None:
+    def record_success(self, module_name: str, status_code: int, host: str | None = None) -> None:
         cb = self.get_circuit_breaker(module_name)
         cb.record_success()
-        self._bpm.record_response(status_code)
+        self._bpm.record_response(status_code, host)
 
-    def record_failure(self, module_name: str, status_code: int, reason: str = "") -> None:
+    def record_failure(self, module_name: str, status_code: int, reason: str = "", host: str | None = None, headers: dict | None = None) -> None:
         cb = self.get_circuit_breaker(module_name)
         opened = cb.record_failure(reason)
-        self._bpm.record_response(status_code)
+        retry_after = self._bpm.parse_retry_after(headers or {})
+        self._bpm.record_response(status_code, host, retry_after)
         if opened:
             self._state.dispatch(Action.CIRCUIT_BREAK, {"module": module_name})
 
@@ -236,20 +270,24 @@ class VigilanteV2:
         data = event.data
         module = data.get("module", "unknown")
         code   = data.get("status_code", 200)
+        host   = data.get("host") or data.get("url","").split("/")[2] if data.get("url") else None
+        headers= data.get("headers", {})
 
-        if code in (403, 429):
+        if code in (403, 429, 503, 425, 408):
             self._waf_detections.append(time.time())
-            # Limpiar detecciones > 5 min
             now = time.time()
             self._waf_detections = [t for t in self._waf_detections if now - t < 300]
-
-            # Si 5+ bloqueos en 5 minutos → activar modo evasión
             if len(self._waf_detections) >= 5 and self._fsm == VState.MONITORING:
                 await self._enter_evasion_mode()
-
-            self.record_failure(module, code, f"HTTP {code}")
+            self.record_failure(module, code, f"HTTP {code}", host, headers)
+        elif code in (500,502,504) or code==0:
+            # 5xx / timeout → provider failure, no WAF pero backoff
+            self.record_failure(module, code, f"HTTP {code}", host, headers)
+        elif 400 <= code < 500:
+            # 4xx distintos de 403/429 → NO aplicar backpressure fuerte, solo registrar
+            self._bpm.record_response(code, host)
         elif code < 400:
-            self.record_success(module, code)
+            self.record_success(module, code, host)
 
     async def _on_module_error(self, event) -> None:
         data   = event.data

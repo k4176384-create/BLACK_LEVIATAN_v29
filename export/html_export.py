@@ -19,16 +19,25 @@ class HtmlExporter:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fn = output_dir / f"bl_{t}_{ts}.html"
         s  = report.get("summary",{})
+        # Support both new report (findings flat) and old phases->results
+        all_findings = report.get("findings") or []
+        if not all_findings:
+            for phase in report.get("phases",[]):
+                for res in phase.get("results",[]):
+                    all_findings.extend(res.get("findings",[]))
+                all_findings.extend(phase.get("findings",[]))
         rows = []
-        for phase in report.get("phases",[]):
-            for fi in phase.get("findings",[]):
-                sev = fi.get("severity","INFO")
-                rows.append(
-                    f"<tr><td class='{sev} badge'>{sev}</td>"
-                    f"<td>{fi.get('type','?')}</td>"
-                    f"<td>{fi.get('value','?')}</td>"
-                    f"<td class='meta'>{phase.get('phase_name','?')}</td></tr>"
-                )
+        for fi in all_findings:
+            sev = fi.get("severity","INFO")
+            vs = fi.get("validation_state","")
+            conf = fi.get("confidence","")
+            ev = fi.get("limitations","")[:80]
+            rows.append(
+                f"<tr><td class='{sev} badge'>{sev}</td>"
+                f"<td>{fi.get('type','?')}<br><span class='meta'>{vs} conf:{conf}</span></td>"
+                f"<td>{fi.get('value','?')}<br><span class='meta'>{ev}</span></td>"
+                f"<td class='meta'>{fi.get('source','?')}</td></tr>"
+            )
         html = f"""<!DOCTYPE html><html lang="es">
 <head><meta charset="UTF-8"><title>BL v29 — {report.get('target','?')}</title>
 <style>{CSS}</style></head><body>

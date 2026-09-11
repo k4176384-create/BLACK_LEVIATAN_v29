@@ -100,6 +100,10 @@ class Orchestrator:
     async def setup_kernels(self) -> None:
         log.info("Iniciando kernels...")
 
+        # Bus y vigilante primero (observabilidad)
+        await self._bus.start()
+        await self._vigilante.start()
+
         from kernels.k3_immortal_storage.storage import ImmortalStorage
         self.storage = ImmortalStorage(self._config)
         await self.storage.init()
@@ -109,6 +113,8 @@ class Orchestrator:
 
         from kernels.k2_deep_correlator.correlator import DeepCorrelator
         self.correlator = DeepCorrelator(self._config, self._bus)
+        # Suscribir correlator a findings para auto-grafo
+        self._bus.subscribe("finding.new", self._on_finding_for_correlator)
 
         from kernels.k6_evasion_mesh.evasion import EvasionMesh
         self.evasion = EvasionMesh(self._config, self._bus, self._state)
@@ -123,7 +129,32 @@ class Orchestrator:
             self._config, self._bus, self._state, self._vigilante
         )
 
-        log.info("✓ 6 Kernels inicializados")
+        # Checkpoint
+        from core.checkpoint import CheckpointManager
+        self._checkpoint = CheckpointManager()
+        # Queue system
+        from core.queue import RetryQueue, PersistentDLQ
+        self._retry_queue = RetryQueue()
+        self._dlq = PersistentDLQ()
+
+        log.info("✓ 6 Kernels inicializados (bus+vigilante activos)")
+
+    async def _on_finding_for_correlator(self, event) -> None:
+        try:
+            data = event.data
+            # data may be finding dict or wrapped
+            f = data.get("finding") if isinstance(data, dict) and "finding" in data else data
+            if not isinstance(f, dict): return
+            v = f.get("value",""); t = f.get("type","")
+            if t.startswith("dns_") or t=="subdomain_ct" or t=="subdomain_brute":
+                self.correlator.graph.add_entity(v, "subdomain" if "." in v else "domain")
+            elif t=="open_port":
+                ip = f.get("metadata",{}).get("ip") or v.split(":")[0]
+                if ip: self.correlator.graph.add_entity(ip, "ip")
+            elif t=="email_exposed":
+                self.correlator.graph.add_entity(v, "email")
+        except Exception:
+            pass
 
     # ── Setup de plugins ──────────────────────
     async def setup_plugins(self) -> None:
@@ -148,9 +179,38 @@ class Orchestrator:
 
     # ── Scan principal ────────────────────────
     async def run_scan(self, target: str) -> dict:
+        from core.target import classify_target, sanitize_for_modules, phases_for_target
+        tinfo = classify_target(target)
+        # Sanitización inteligente
+        if tinfo.type.value == "unknown" and tinfo.confidence >= 0.8:
+            log.warning("Target UNKNOWN con alta confianza UNKNOWN, solo fase 1: %s warnings=%s", target, tinfo.warnings)
+        sanitized = sanitize_for_modules(tinfo)
+        self._config.target = sanitized
+        self._context["target_info"] = tinfo.__dict__
+        self._context["target_raw"] = target
+        self._context["target_sanitized"] = sanitized
+        log.info("Target clasificado: %s → %s (type=%s conf=%.2f)", target, sanitized, tinfo.type.value, tinfo.confidence)
+
+        # Filtrado inteligente de fases según tipo
+        intelligent_phases = phases_for_target(tinfo.type) if hasattr(tinfo.type, "value") else set(range(1,11))
+        # Intersect con enabled_phases configuradas (CLI)
+        enabled_phases = [p for p in self._config.dag.enabled_phases if p in intelligent_phases]
+        if not enabled_phases:
+            log.warning("Ninguna fase relevante para tipo %s, forzando fase 1", tinfo.type.value)
+            enabled_phases = [1]
+        log.info("Fases seleccionadas (inteligente): %s (de %s configuradas)", enabled_phases, self._config.dag.enabled_phases)
+
         self._running = True
+        # Checkpoint new job
+        job_id = self._checkpoint.new_job(sanitized) if hasattr(self, "_checkpoint") else "no-ckpt"
+        self._context["job_id"] = job_id
+        # Storage scan_id = job_id
+        try:
+            await self.storage.create_scan(job_id, sanitized)
+        except Exception as e:
+            log.debug("create_scan: %s", e)
         self._state.dispatch(Action.INIT_SCAN, {
-            "target":      target,
+            "target":      sanitized,
             "phase_names": PHASE_NAMES,
         })
         self._state.dispatch(Action.START_SCAN, {})
@@ -159,9 +219,16 @@ class Orchestrator:
         if self.dashboard:
             await self.dashboard.start()
 
-        await self._bus.publish("system.scan_start", {"target": target}, Priority.CRITICAL)
+        # Signal handler
+        try:
+            from core.signal_handler import GracefulShutdown
+            GracefulShutdown(self).install()
+        except Exception:
+            pass
 
-        enabled_phases = self._config.dag.enabled_phases
+        await self._bus.publish("system.scan_start", {"target": sanitized, "job_id": job_id, "target_info": tinfo.__dict__}, Priority.CRITICAL)
+
+        # enabled_phases ya filtrado arriba
 
         try:
             # Ejecutar fases según el DAG
@@ -185,15 +252,38 @@ class Orchestrator:
             # Hook de completado
             await self._hooks.fire(HookType.ON_COMPLETE, {"context": self._context})
 
+            # Correlator analysis final
+            try:
+                corr_analysis = await self.correlator.analyze()
+                self._context["correlator_analysis"] = corr_analysis
+            except Exception as e:
+                log.debug("Correlator analyze falló: %s", e)
+
             # Intel final
             final_score = await self.intel.compute_final_score(self._results)
             self._state.dispatch(Action.UPDATE_RISK_SCORE, {"score": final_score})
+            self._context["risk_score"] = final_score
+
+            # Checkpoint save
+            try:
+                if hasattr(self, "_checkpoint"):
+                    self._checkpoint.save(self._phase_done, self._results, self._context, self._state.snapshot())
+            except Exception:
+                pass
 
             # Exportar
-            await self._export_results(target)
+            await self._export_results(sanitized)
+            # Cerrar scan en storage
+            try:
+                await self.storage.close_scan(job_id, final_score)
+            except: pass
 
         except asyncio.CancelledError:
             log.warning("Scan cancelado")
+            try:
+                if hasattr(self, "_checkpoint"):
+                    self._checkpoint.save(self._phase_done, self._results, self._context, self._state.snapshot())
+            except: pass
         except Exception as exc:
             log.exception("Error crítico en orchestrator: %s", exc)
             self._state.dispatch(Action.ERROR, {"message": str(exc)})
@@ -202,8 +292,20 @@ class Orchestrator:
             if self.dashboard:
                 await self.dashboard.stop()
             await self._bus.publish("system.scan_done", {}, Priority.CRITICAL)
+            # Close bus/vigilante
+            try:
+                await self._bus.stop()
+                await self._vigilante.stop()
+                if self.storage: await self.storage.close()
+                if self.crawler: await self.crawler.close()
+                if self.evasion: await self.evasion.stop()
+            except: pass
 
-        return self._context
+        # Return built report (evidence-driven) instead of raw context
+        try:
+            return self._build_report(sanitized)
+        except:
+            return self._context
 
     async def _run_phase(self, phase_num: int) -> None:
         modules = self.loader.get_for_phase(phase_num) if self.loader else []
@@ -275,11 +377,21 @@ class Orchestrator:
                 # Guardar resultado
                 self._results[module.NAME] = result
                 await self.storage.save_module_result(result)
+                # Checkpoint incremental
+                try:
+                    if hasattr(self, "_checkpoint"):
+                        self._checkpoint.save(self._phase_done, self._results, self._context, self._state.snapshot())
+                except: pass
 
-                # Emitir findings al bus
+                # Emitir findings al bus (incluye provenance)
                 for finding in result.findings:
                     await self._bus.publish("finding.new", finding.to_dict())
                     self._state.dispatch(Action.NEW_FINDING, {"severity": finding.severity.label})
+                # Manejar DLQ si result sin findings pero con errores críticos
+                if not result.findings and result.errors and hasattr(self, "_dlq"):
+                    from core.queue import QueuedTask, TaskStatus
+                    t = QueuedTask(priority=5, task_id=f"{module.NAME}-{phase_num}", module=module.NAME, phase=phase_num, target=self._config.target, attempts=1, last_error="; ".join(result.errors))
+                    t.status = TaskStatus.FAILED
 
                 # Hook post-módulo
                 await self._hooks.fire(HookType.POST_MODULE, {
@@ -320,21 +432,58 @@ class Orchestrator:
             self._phase_done.add(phase_num)
         log.info("Fase %d '%s' completada: %d findings", phase_num, phase_name, phase_findings)
 
+    def _build_report(self, target: str) -> dict:
+        """Construye report unificado para exporters."""
+        # Deduplicate findings globally por (type,value)
+        seen=set()
+        all_findings=[]
+        for r in self._results.values():
+            for f in r.findings:
+                key=(f.type, f.value)
+                if key not in seen:
+                    seen.add(key); all_findings.append(f.to_dict())
+        # Group by phase for legacy exporters
+        phases_dict: dict[int, list[dict]] = {}
+        for r in self._results.values():
+            phases_dict.setdefault(int(r.phase), []).append(r.to_dict())
+        phases=[{"phase": k, "results": v, "findings": [f for res in v for f in res["findings"]]} for k,v in sorted(phases_dict.items())]
+        # Severity counts correctly using label
+        sev_counts={}
+        for f in all_findings:
+            sev_counts[f["severity"]] = sev_counts.get(f["severity"],0)+1
+        return {
+            "target": target,
+            "job_id": self._context.get("job_id"),
+            "target_info": self._context.get("target_info"),
+            "phases": phases,
+            "module_results": [r.to_dict() for r in self._results.values()],
+            "findings": all_findings,
+            "total_findings": len(all_findings),
+            "severity_counts": sev_counts,
+            "total_risk": self._state.state.risk_score,
+            "scan_meta": self._state.snapshot(),
+            "correlator": self._context.get("correlator_analysis"),
+            "context": {k:v for k,v in self._context.items() if k not in ("correlator_analysis",)},
+            "summary": {
+                "total_findings": len(all_findings),
+                "critical": sev_counts.get("CRITICAL",0),
+                "high": sev_counts.get("HIGH",0),
+                "medium": sev_counts.get("MEDIUM",0),
+                "low": sev_counts.get("LOW",0),
+                "info": sev_counts.get("INFO",0),
+                "modules_run": len(self._results),
+                "phases_run": len(phases),
+            }
+        }
+
     # ── Exportación ───────────────────────────
     async def _export_results(self, target: str) -> None:
         from export import get_exporter
-        all_results = [r.to_dict() for r in self._results.values()]
-        scan_meta = self._state.snapshot()
-
+        report = self._build_report(target)
         for fmt in self._config.export.formats:
             try:
                 exporter = get_exporter(fmt)
-                await exporter.export(
-                    results=all_results,
-                    metadata=scan_meta,
-                    target=target,
-                    output_dir=self._config.export.output_dir,
-                )
+                await exporter.export(report, self._config.export.output_dir)
                 log.info("✓ Exportado: %s", fmt)
             except Exception as exc:
                 log.error("Error exportando %s: %s", fmt, exc)

@@ -32,27 +32,43 @@ class CrtshStream(BaseModule):
                             issuer = entry.get("issuer_name", "")
                             for sub in name.split("\n"):
                                 sub = sub.strip().lstrip("*.")
+                                # Validación: filtrar emails, espacios, CN=, y verificar FQDN
+                                if not sub or "@" in sub or " " in sub or "CN=" in sub or "," in sub:
+                                    continue
+                                # Debe ser FQDN válido y terminar en target
                                 if sub and sub.endswith(target) and sub != target:
-                                    subdomains.add(sub)
+                                    # Labels 1-63 chars, no empezar con -
+                                    import re
+                                    if re.match(r"^(?!-)[A-Za-z0-9.-]{1,253}$", sub):
+                                        subdomains.add(sub.lower())
 
-                            # Certificados wildcard → posible ataque de subdomain takeover
+                            # Certificados wildcard → sanitizar valor (sin newline)
                             if "*." in name:
+                                clean_name = name.replace("\n"," ").strip()[:200]
                                 result.add_finding(
                                     type="wildcard_cert",
-                                    value=name,
+                                    value=clean_name,
                                     severity=Severity.LOW,
                                     confidence=0.9,
                                     metadata={"issuer": issuer},
                                     tags=["cert", "wildcard"],
                                 )
 
-            for sub in sorted(subdomains)[:200]:  # límite razonable
+            from core.validation import validate_finding, confidence_engine
+            from modules.base_module import ValidationState
+            for sub in sorted(subdomains)[:200]:
+                val = validate_finding("subdomain_ct", sub, {})
+                vs = ValidationState.OBSERVED if val["validation_state"]=="OBSERVED" else ValidationState.INFERRED
+                conf = confidence_engine("crtsh", 0.95, 0)
                 result.add_finding(
                     type="subdomain_ct",
                     value=sub,
                     severity=Severity.INFO,
-                    confidence=0.95,
+                    confidence=conf,
                     tags=["subdomain", "crt"],
+                    validation_state=vs,
+                    provenance={"source": "crt.sh", "source_type": "ct_log", "method": "crtsh_stream"},
+                    limitations=val["limitations"],
                 )
 
             self.push_to_context(context, "ct_subdomains", list(subdomains))

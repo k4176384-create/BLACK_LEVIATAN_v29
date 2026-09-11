@@ -65,22 +65,45 @@ class TechFingerprint(BaseModule):
                     html    = await resp.text(errors="replace")
                     cookies = {c.key: c.value for c in resp.cookies.values()}
 
+                    # Edge detection para degradar tech CDN
+                    from core.edge_detector import detect_edge
+                    from core.validation import validate_finding, confidence_engine
+                    from modules.base_module import ValidationState
+                    geo_asn = ""
+                    if context.get("geo_data"):
+                        # tomar primer ASN
+                        geo_asn = next(iter(context["geo_data"].values()), {}).get("asn","")
+                    edge_info = detect_edge(headers, asn=geo_asn)
+
                     # Analizar headers
                     for hdr, detect_fn in TECH_SIGNATURES["headers"].items():
                         val = headers.get(hdr) or headers.get(hdr.title())
                         if val:
                             tech_type, tech_name, sev = detect_fn(val)
+                            # Si es CDN y edge detectado, marcar como EDGE no ORIGIN
+                            is_cdn_header = hdr in ("cf-ray","x-amz-cf-id")
+                            meta = {"header": hdr, "value": val, "edge": edge_info if is_cdn_header else {}}
+                            val_res = validate_finding(f"tech_{tech_type}", val, meta)
+                            vs = ValidationState.INFERRED if is_cdn_header else ValidationState.INFERRED
+                            conf = confidence_engine("http_header", 0.85 if is_cdn_header else 0.90, 0)
+                            if is_cdn_header and edge_info["is_edge"]:
+                                sev = Severity.INFO
+                                limitations = f"CDN header {hdr} indica EDGE ({edge_info['provider']}) — no confirma ORIGIN. {edge_info['limitations']}"
+                            else:
+                                limitations = val_res["limitations"]
                             detected.append({"type": tech_type, "name": tech_name or val})
-                            # Versiones en Server header = divulgación de info
                             version_match = re.search(r"[\d\.]+", val)
                             final_sev = Severity.LOW if version_match else sev
                             result.add_finding(
                                 type=f"tech_{tech_type}",
                                 value=f"{tech_name or val}",
                                 severity=final_sev,
-                                confidence=0.95,
-                                metadata={"header": hdr, "value": val},
-                                tags=["tech", tech_type],
+                                confidence=conf,
+                                metadata=meta,
+                                tags=["tech", tech_type] + (["edge"] if is_cdn_header and edge_info["is_edge"] else []),
+                                validation_state=vs,
+                                limitations=limitations,
+                                provenance={"source": "http_header", "source_type": "passive", "method": "header_fingerprint"},
                             )
 
                     # Analizar cookies
@@ -91,9 +114,11 @@ class TechFingerprint(BaseModule):
                                 type=f"tech_{tech_type}",
                                 value=tech_name,
                                 severity=Severity.INFO,
-                                confidence=0.9,
+                                confidence=confidence_engine("http_header", 0.90, 0),
                                 metadata={"cookie": cookie_name},
                                 tags=["tech", tech_type],
+                                validation_state=ValidationState.INFERRED,
+                                provenance={"source": "http_cookie", "source_type": "passive", "method": "cookie_fingerprint"},
                             )
 
                     # Analizar HTML
@@ -106,9 +131,12 @@ class TechFingerprint(BaseModule):
                                 type=f"tech_{tech_type}",
                                 value=str(name)[:80],
                                 severity=Severity.INFO,
-                                confidence=0.85,
+                                confidence=confidence_engine("html_pattern", 0.80, 0),
                                 metadata={"pattern": pattern[:50]},
                                 tags=["tech", tech_type],
+                                validation_state=ValidationState.INFERRED,
+                                limitations="Firma HTML puede venir de CDN/template/framework compartido",
+                                provenance={"source": "html", "source_type": "passive", "method": "html_pattern"},
                             )
 
             self.push_to_context(context, "detected_tech", detected)

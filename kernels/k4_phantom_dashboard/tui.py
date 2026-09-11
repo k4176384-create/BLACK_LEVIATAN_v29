@@ -160,6 +160,7 @@ class PhantomDashboard:
         layout.split_column(
             Layout(self._header_panel(), size=3),
             Layout(name="main"),
+            Layout(self._queue_panel(), size=4),
             Layout(self._footer_panel(), size=3),
         )
         layout["main"].split_row(
@@ -168,6 +169,26 @@ class PhantomDashboard:
             Layout(self._findings_panel(), ratio=1),
         )
         return layout
+
+    def _queue_panel(self) -> Panel:
+        # Queue / Rate / Resources — nueva observabilidad
+        try:
+            from pathlib import Path
+            import psutil, os
+            rss = psutil.Process(os.getpid()).memory_info().rss // 1024 // 1024
+            rss_str = f"{rss} MB"
+        except Exception:
+            rss_str = "?"
+        # Bus stats
+        try:
+            qsize = self._bus.stats["queue_size"]
+            dlq = self._bus.stats["dead_letter_count"]
+        except: qsize=0; dlq=0
+        cb = self._state.state.circuit_breaks
+        rate = getattr(self._vigilante._bpm, "current_delay", "?") if hasattr(self, "_vigilante") else "?"
+        msg = f"[{C_SUBTEXT}]COLA[/] pending:{qsize} dlq:{dlq} cb:{cb} │ [{C_SUBTEXT}]RATE[/] delay:{rate}s │ [{C_SUBTEXT}]RAM[/] {rss_str} │ [{C_SUBTEXT}]Target[/] {self._state.state.target[:22]}"
+        # Add target_info warnings if any
+        return Panel(msg, border_style=C_SURFACE, style=f"on {C_BG}")
 
     def _header_panel(self) -> Panel:
         s = self._state.state

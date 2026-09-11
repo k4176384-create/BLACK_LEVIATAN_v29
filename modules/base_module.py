@@ -12,13 +12,14 @@ import time
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import IntEnum
+from enum import IntEnum, Enum
 from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.event_bus import EventBus
     from kernels.k3_immortal_storage.storage import ImmortalStorage
     from bl_config import BLConfig
+    from core.target import TargetType
 
 
 # ──────────────────────────────────────────────
@@ -64,6 +65,31 @@ class Severity(IntEnum):
 
 
 # ──────────────────────────────────────────────
+# Validation state
+# ──────────────────────────────────────────────
+class ValidationState(str, Enum):
+    OBSERVED     = "OBSERVED"      # Directamente observado (DNS A record, HTTP 200)
+    INFERRED     = "INFERRED"      # Inferido con evidencia parcial (tech fingerprint via header)
+    CORRELATED   = "CORRELATED"    # Corroborado por 2+ fuentes
+    LIKELY       = "LIKELY"        # Alta probabilidad pero no confirmado
+    CONFIRMED    = "CONFIRMED"     # Confirmado con múltiples evidencias + validación activa
+    UNVERIFIED   = "UNVERIFIED"    # Sin validación (default para hallazgos de API externa)
+    CONTRADICTED = "CONTRADICTED"  # Contradicho por otra fuente
+    STALE        = "STALE"         # Dato obsoleto (TTL expirado)
+
+class Provenance:
+    """Origen reproducible de un hallazgo."""
+    def __init__(self, source: str, source_type: str = "module", method: str = "", request: dict | None = None, response: dict | None = None, retrieved_at: float | None = None):
+        self.source = source
+        self.source_type = source_type
+        self.method = method
+        self.request = request or {}
+        self.response = response or {}
+        self.retrieved_at = retrieved_at or time.time()
+    def to_dict(self) -> dict:
+        return {"source": self.source, "source_type": self.source_type, "method": self.method, "request": self.request, "response": self.response, "retrieved_at": self.retrieved_at}
+
+# ──────────────────────────────────────────────
 # Hallazgo individual
 # ──────────────────────────────────────────────
 @dataclass
@@ -76,6 +102,13 @@ class Finding:
     metadata:    dict     = field(default_factory=dict)
     timestamp:   float    = field(default_factory=time.time)
     tags:        list[str] = field(default_factory=list)
+    # ── Nuevos campos evidence-driven ──────────────────
+    validation_state: ValidationState = ValidationState.UNVERIFIED
+    evidence:    dict     = field(default_factory=dict)  # {request, response, snippet, headers}
+    provenance:  dict     = field(default_factory=dict)  # {source, source_type, method, retrieved_at}
+    limitations: str      = ""
+    corroboration: list[str] = field(default_factory=list)
+    observed_at: float    = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
         return {
@@ -87,6 +120,12 @@ class Finding:
             "metadata":   self.metadata,
             "timestamp":  self.timestamp,
             "tags":       self.tags,
+            "validation_state": self.validation_state.value if isinstance(self.validation_state, ValidationState) else str(self.validation_state),
+            "evidence":   self.evidence,
+            "provenance": self.provenance,
+            "limitations":self.limitations,
+            "corroboration": self.corroboration,
+            "observed_at": self.observed_at,
         }
 
 
@@ -166,6 +205,10 @@ class BaseModule(ABC):
     VERSION:          str       = "1.0.0"
     AUTHOR:           str       = "Luis Sánchez"
     TAGS:             list[str] = []
+    INPUT_TYPES:      set       = set()  # TargetType set; vacío = todos
+    # Declarativo de capacidades (para scheduler inteligente)
+    NETWORK_REQUIRED: bool = True
+    RATE_LIMIT_SCOPE: str = "domain"  # global|provider|domain|module
 
     def __init__(
         self,

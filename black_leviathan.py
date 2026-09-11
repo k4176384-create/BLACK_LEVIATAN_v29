@@ -74,6 +74,11 @@ Formatos de salida:
     ug.add_argument("--list-modules",    action="store_true")
     ug.add_argument("--list-plugins",    action="store_true")
     ug.add_argument("--validate-config", action="store_true")
+    ug.add_argument("--doctor",          action="store_true", help="Self-audit: módulos desconectados, bus, export")
+    ug.add_argument("--health",          action="store_true", help="Estado de recursos y jobs")
+    ug.add_argument("--jobs",            action="store_true", help="Listar checkpoints recuperables")
+    ug.add_argument("--resume",          metavar="JOB_ID", help="Reanudar job")
+    ug.add_argument("--retry-failed",    metavar="JOB_ID", help="Reintentar DLQ de un job")
     ug.add_argument("--version", "-v",   action="version",
                     version="BLACK LEVIATAN v29 — by Luis Sánchez")
     return p.parse_args()
@@ -114,6 +119,11 @@ async def run_scan(args: argparse.Namespace) -> int:
     if args.plugin_dir:
         config.plugins.plugin_dirs = [Path(args.plugin_dir)]
 
+    # CLI output_dir debe propagarse a config.export.output_dir para que orchestrator exporte ahí
+    if args.output_dir:
+        config.export.output_dir = Path(args.output_dir)
+        config.export.output_dir.mkdir(parents=True, exist_ok=True)
+
     # Sistema
     bus       = EventBus()
     state     = StateManager()
@@ -128,14 +138,11 @@ async def run_scan(args: argparse.Namespace) -> int:
     await orchestrator.setup_kernels()
     await orchestrator.setup_plugins()
 
-    # Targets
+    # Targets: NO sanitizar aquí, delegar a core/target.py (soporta IP, email, URL)
     targets: list[str] = []
     if args.target:
-        targets.append(
-            args.target.strip().lower()
-            .removeprefix("https://").removeprefix("http://")
-            .rstrip("/").split("/")[0]
-        )
+        # Mantener raw para que target.py clasifique (puede ser email/IP/URL)
+        targets.append(args.target.strip())
     if args.file:
         targets += [
             ln.strip().lower() for ln in Path(args.file).read_text().splitlines()
@@ -153,22 +160,24 @@ async def run_scan(args: argparse.Namespace) -> int:
         if not args.quiet:
             print(f"\n{'─'*60}\n  🦑  BLACK LEVIATAN v29  |  {target}\n{'─'*60}\n")
 
-        # CRÍTICO: el Orchestrator pasa config.target a los módulos (no el arg de run_scan)
-        config.target = target
-
+        # Target sanitization se hace DENTRO del orchestrator (target.py)
+        # No sobre-escribir config.target aquí; orchestrator clasifica y sanitiza
         report = await orchestrator.run_scan(target)
-        report["target"] = target
+        # Orchestrator ya retorna report unificado con _build_report (target sanitized)
+        # Asegurar target raw visible
+        report["target_raw"] = target
 
-        # IntelPipeline lee report.get("phases") que no existe en el context plano.
-        # Calcular risk desde orchestrator._results directamente.
-        if hasattr(orchestrator, "_results") and orchestrator._results:
+        # Deduplicate ya hecho en orchestrator; solo usar report directo
+        # Si orchestrator no pudo scoring, fallback correcto usando label
+        if "total_risk" not in report or report.get("total_risk") is None:
             W = {"CRITICAL": 4.0, "HIGH": 2.0, "MEDIUM": 1.0, "LOW": 0.3, "INFO": 0.0}
             total_risk = 0.0
             sev_counts: dict[str, int] = {k: 0 for k in W}
             for mod_result in orchestrator._results.values():
                 for finding in getattr(mod_result, "findings", []):
                     sev = getattr(finding, "severity", None)
-                    sev_str = sev.value if hasattr(sev, "value") else str(sev) if sev else "INFO"
+                    # Fix: severity es IntEnum, usar label no value
+                    sev_str = sev.label if hasattr(sev, "label") else str(sev) if sev else "INFO"
                     conf = getattr(finding, "confidence", 0.5)
                     total_risk += W.get(sev_str, 0) * conf
                     sev_counts[sev_str] = sev_counts.get(sev_str, 0) + 1
@@ -176,13 +185,19 @@ async def run_scan(args: argparse.Namespace) -> int:
             report["severity_counts"] = sev_counts
             report["total_findings"] = sum(sev_counts.values())
 
-        try:
-            from export import get_exporter
-            out = await get_exporter(args.output).export(report, output_dir)
+        # Export ya hecho por orchestrator para todos los formatos en config.export.formats
+        # Pero CLI pide un formato específico -- si no está en lista, exportar adicional
+        if args.output not in orchestrator._config.export.formats:
+            try:
+                from export import get_exporter
+                out = await get_exporter(args.output).export(report, output_dir)
+                if not args.quiet:
+                    print(f"\n  ✅ Reporte CLI ({args.output}): {out}")
+            except Exception as exc:
+                log.error("Export CLI error: %s", exc)
+        else:
             if not args.quiet:
-                print(f"\n  ✅ Reporte: {out}")
-        except Exception as exc:
-            log.error("Export error: %s", exc)
+                print(f"\n  ✅ Reporte(s) en: {output_dir} (ver formatos {orchestrator._config.export.formats})")
 
     return 0
 
@@ -284,6 +299,61 @@ def main() -> None:
         for k, v in config.api.model_dump().items():
             status = "✅" if v else "⚠️  sin configurar"
             console.print(f"  {k:25s}: {status}")
+        return
+
+    if args.doctor:
+        import subprocess, sys
+        sys.exit(subprocess.call([sys.executable, "tools/doctor.py"]))
+
+    if args.health:
+        from pathlib import Path
+        from rich.console import Console
+        console=Console()
+        console.print("[bold magenta]BLACK LEVIATAN v29 — Health[/]")
+        # resources
+        try:
+            import psutil, os
+            rss=psutil.Process(os.getpid()).memory_info().rss//1024//1024
+            console.print(f"  RSS: {rss} MB")
+            console.print(f"  CPU: {psutil.cpu_percent()}%")
+        except: console.print("  psutil no disponible")
+        # checkpoints
+        from core.checkpoint import CheckpointManager
+        cm=CheckpointManager()
+        jobs=cm.list_jobs()
+        console.print(f"  Jobs recuperables: {len(jobs)}")
+        for j in jobs[:5]:
+            console.print(f"    {j['job_id']} {j['target']}")
+        # dlq
+        try:
+            from core.queue import PersistentDLQ
+            dlq=PersistentDLQ()
+            items=dlq.list(5)
+            console.print(f"  DLQ items: {len(items)}")
+        except Exception as e:
+            console.print(f"  DLQ error: {e}")
+        return
+
+    if args.jobs:
+        from core.checkpoint import CheckpointManager
+        from rich.console import Console
+        from rich.table import Table
+        cm=CheckpointManager()
+        jobs=cm.list_jobs()
+        console=Console()
+        table=Table(title="Jobs recuperables")
+        table.add_column("JOB_ID"); table.add_column("Target"); table.add_column("Updated")
+        for j in jobs:
+            table.add_row(str(j['job_id']), str(j['target']), str(j.get('updated_at','')))
+        console.print(table)
+        return
+
+    if args.resume:
+        # Resume stub: muestra checkpoint
+        from core.checkpoint import CheckpointManager
+        cm=CheckpointManager()
+        data=cm.load(args.resume)
+        print(f"Checkpoint {args.resume}: {data}")
         return
 
     sys.exit(asyncio.run(run_scan(args)))

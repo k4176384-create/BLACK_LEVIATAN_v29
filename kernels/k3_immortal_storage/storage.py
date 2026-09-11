@@ -112,12 +112,21 @@ class ImmortalStorage:
         log.info("K3 Storage inicializado: SQLite WAL + DuckDB")
 
     def _init_sqlite(self) -> None:
+        import threading
+        self._lock = threading.Lock()
         self._conn = sqlite3.connect(
             str(self._sqlite_path),
             check_same_thread=False,
             isolation_level=None,   # autocommit
         )
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA_SQL)
+        # Dedup index: prevent duplicate findings on re-run (idempotent)
+        try:
+            self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_dedup ON findings(scan_id, type, value)")
+        except: pass
         self._conn.commit()
 
     def _init_duckdb(self) -> None:
@@ -153,43 +162,55 @@ class ImmortalStorage:
     def _save_result_sync(self, result: "ModuleResult") -> None:
         if not self._conn:
             return
-        self._conn.execute(
-            """INSERT INTO module_results
-               (scan_id, module_name, phase, target, risk_score, exec_time,
-                skipped, skip_reason, metadata, errors)
-               VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (
-                self._scan_id,
-                result.module_name,
-                int(result.phase),
-                result.target,
-                result.risk_score,
-                result.execution_time,
-                int(result.skipped),
-                result.skip_reason,
-                json.dumps(result.metadata),
-                json.dumps(result.errors),
-            )
-        )
-        for f in result.findings:
-            self._conn.execute(
-                """INSERT INTO findings
-                   (scan_id, module_name, phase, type, value, severity,
-                    confidence, metadata, tags, timestamp)
-                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    self._scan_id,
-                    result.module_name,
-                    int(result.phase),
-                    f.type,
-                    f.value,
-                    f.severity.label,
-                    f.confidence,
-                    json.dumps(f.metadata),
-                    json.dumps(f.tags),
-                    f.timestamp,
+        # Thread-safe + idempotent via UNIQUE index
+        with self._lock:
+            # Use transaction for atomicity
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    """INSERT INTO module_results
+                       (scan_id, module_name, phase, target, risk_score, exec_time,
+                        skipped, skip_reason, metadata, errors)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        self._scan_id,
+                        result.module_name,
+                        int(result.phase),
+                        result.target,
+                        result.risk_score,
+                        result.execution_time,
+                        int(result.skipped),
+                        result.skip_reason,
+                        json.dumps(result.metadata),
+                        json.dumps(result.errors),
+                    )
                 )
-            )
+                for f in result.findings:
+                    try:
+                        self._conn.execute(
+                            """INSERT OR IGNORE INTO findings
+                               (scan_id, module_name, phase, type, value, severity,
+                                confidence, metadata, tags, timestamp)
+                               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                            (
+                                self._scan_id,
+                                result.module_name,
+                                int(result.phase),
+                                f.type,
+                                f.value,
+                                f.severity.label,
+                                f.confidence,
+                                json.dumps(f.metadata),
+                                json.dumps(f.tags),
+                                f.timestamp,
+                            )
+                        )
+                    except Exception as e:
+                        log.debug("Insert finding ignore: %s", e)
+                self._conn.commit()
+            except Exception as e:
+                self._conn.rollback()
+                log.error("Save result tx failed: %s", e)
 
     # ── Queries analíticas (DuckDB) ────────────
     async def query(self, sql: str, params: list = None) -> list[dict]:

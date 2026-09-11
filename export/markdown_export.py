@@ -34,11 +34,26 @@ class MarkdownExporter:
             f"## Hallazgos",
             f"",
         ]
+        # Support both flat findings and phase->results
+        all_findings = report.get("findings") or []
+        if not all_findings:
+            for phase in report.get("phases",[]):
+                for res in phase.get("results",[]):
+                    all_findings.extend(res.get("findings",[]))
+                all_findings.extend(phase.get("findings",[]))
+        # Group by validation
+        lines.append("### Hallazgos (con evidencia)")
+        for f_ in all_findings[:100]:
+            icon = SEV_ICONS.get(f_.get("severity","INFO"),"⚪")
+            vs = f_.get("validation_state","")
+            lim = f_.get("limitations","")
+            extra = f" _( {vs} conf:{f_.get('confidence')} )_" if vs else ""
+            lines.append(f"- {icon} **{f_.get('type','?')}**: {f_.get('value','?')}{extra}")
+            if lim:
+                lines.append(f"  > _Limitación: {lim}_")
+        # Also per-phase summary
         for phase in report.get("phases",[]):
-            lines.append(f"### Fase {phase.get('phase','?')} — {phase.get('phase_name','?')}")
-            for f_ in phase.get("findings",[]):
-                icon = SEV_ICONS.get(f_.get("severity","INFO"),"⚪")
-                lines.append(f"- {icon} **{f_.get('type','?')}**: {f_.get('value','?')}")
-            lines.append("")
+            lines.append(f"### Fase {phase.get('phase','?')} — hallazgos: {len(phase.get('results',[]))} módulos")
+        lines.append("")
         fn.write_text("\n".join(lines), encoding="utf-8")
         return fn

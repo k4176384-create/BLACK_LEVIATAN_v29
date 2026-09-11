@@ -58,25 +58,47 @@ class PortScan(BaseModule):
                         except Exception:
                             pass
 
-                        # Confianza basada en banner y tipo de puerto
                         has_banner = len(banner) > 0
                         is_high_risk = port in HIGH_RISK_PORTS
+                        # Edge detection: si IP es Cloudflare/EDGE, degradar CRITICAL
+                        from core.edge_detector import detect_edge
+                        edge = detect_edge({}, ip=host_ip, asn=context.get("geo_data",{}).get(host_ip,{}).get("asn",""))
+                        is_edge = edge["is_edge"]
+                        # ValidationEngine
+                        from core.validation import validate_finding
+                        meta_tmp = {"ip": host_ip, "port": port, "has_banner": has_banner}
+                        val = validate_finding("open_port", f"{host_ip}:{port}", meta_tmp)
 
-                        # CDN/anycast suelen cerrar la conexión inmediatamente (banner vacío)
-                        # en puertos de alto riesgo → confidence baja, etiqueta especial
-                        if is_high_risk and not has_banner:
-                            confidence = 0.5   # Posible falso positivo anycast
+                        if is_edge and is_high_risk and not has_banner:
+                            confidence = 0.35
+                            note = f"EDGE {edge['provider']} — sin banner, altamente sospechoso anycast"
+                            sev = Severity.LOW  # degradado, no CRITICAL
+                            validation_state = "INFERRED"
+                            limitations = "IP pertenece a CDN/EDGE (AS13335). Puerto abierto aparente probablemente no es ORIGIN."
+                        elif is_high_risk and not has_banner:
+                            confidence = val["confidence"]
                             note = "posible anycast — sin banner"
+                            sev = Severity.MEDIUM  # degradado de CRITICAL
+                            validation_state = val["validation_state"]
+                            limitations = val["limitations"]
                         elif has_banner:
                             confidence = 0.95
                             note = banner[:32].decode("utf-8", errors="replace").strip()
+                            sev = Severity.CRITICAL if is_high_risk else Severity.LOW
+                            validation_state = "OBSERVED"
+                            limitations = ""
                         else:
                             confidence = 0.75
                             note = "conexión aceptada sin banner"
+                            sev = Severity.LOW
+                            validation_state = "OBSERVED"
+                            limitations = ""
 
+                        # Si edge, marcar provenance
                         open_ports.append(port)
                         service = TOP_PORTS.get(port, "unknown")
-                        sev = Severity.CRITICAL if is_high_risk else Severity.LOW
+                        from modules.base_module import ValidationState
+                        vs = getattr(ValidationState, validation_state, ValidationState.INFERRED)
 
                         result.add_finding(
                             type="open_port",
@@ -90,8 +112,13 @@ class PortScan(BaseModule):
                                 "banner":     banner[:64].decode("utf-8", errors="replace") if banner else None,
                                 "has_banner": has_banner,
                                 "note":       note,
+                                "edge":       edge,
                             },
-                            tags=["port", "tcp"],
+                            tags=["port", "tcp"] + (["edge"] if is_edge else []),
+                            validation_state=vs,
+                            limitations=limitations,
+                            evidence={"banner": banner[:64].decode("utf-8", errors="replace") if banner else "", "is_edge": is_edge},
+                            provenance={"source": "port_scan", "source_type": "active_tcp", "method": "banner_grab"},
                         )
                     except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
                         pass

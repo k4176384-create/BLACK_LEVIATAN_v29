@@ -152,6 +152,10 @@ class DAGConfig(BaseModel):
     parallel_workers: int     = 8
     phase_timeout:    float   = 600.0  # 10 min max por fase
     module_timeout:   float   = 120.0  # 2 min max por módulo
+    max_concurrency:  int     = 30     # cap global para módulos individuales
+    max_memory_mb:    int     = 1024   # RSS cap para degradar
+    max_queue_size:   int     = 5000
+    max_cache_entries:int     = 10000
 
 
 # ──────────────────────────────────────────────

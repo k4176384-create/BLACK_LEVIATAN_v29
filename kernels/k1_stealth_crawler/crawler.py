@@ -155,37 +155,39 @@ class StealthCrawler:
     async def get(self, url: str, module_name: str = "k1") -> CrawlResult:
         """
         Petición GET con fallback automático a Playwright si aiohttp recibe 403/429.
+        Incluye per-host gate + Retry-After propagation.
         """
-        # Rate limiting + circuit breaker
-        if not await self._vigilante.gate(module_name):
+        host = urlparse(url).hostname or ""
+        # Rate limiting + circuit breaker per-host
+        if not await self._vigilante.gate(module_name, host):
             return CrawlResult(url=url, status=0, body="", headers={},
                                latency_ms=0, error="Circuit breaker open")
 
         await self._bucket.acquire()
 
-        # Proxy del pool si está configurado
         proxy = self._get_proxy()
 
         # Intento 1: aiohttp
         result = await self._fetch_aiohttp(url, proxy)
 
-        # Notificar al vigilante
+        # Notificar al vigilante con host+headers para Retry-After
         await self._bus.publish(f"module.{module_name}.http_response", {
             "module":      module_name,
             "url":         url,
+            "host":        host,
             "status_code": result.status,
+            "headers":     result.headers,
         })
 
-        # Fallback a Playwright si el servidor bloquea
-        if result.status in (403, 429, 503) or result.error:
+        if result.status in (403, 429, 503, 425) or result.error:
             log.debug("K1: aiohttp bloqueado (%d), intentando Playwright: %s", result.status, url)
             result = await self._fetch_playwright(url)
 
         if result.status < 400:
-            self._vigilante.record_success(module_name, result.status)
+            self._vigilante.record_success(module_name, result.status, host)
             result.links = self._extract_links(url, result.body)
         else:
-            self._vigilante.record_failure(module_name, result.status, f"HTTP {result.status}")
+            self._vigilante.record_failure(module_name, result.status, f"HTTP {result.status}", host, result.headers)
 
         return result
 
