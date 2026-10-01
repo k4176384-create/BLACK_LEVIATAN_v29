@@ -80,8 +80,8 @@ class PasteMonitor(BaseModule):
                 except Exception as exc:
                     result.add_error(f"DDG paste: {exc}")
 
-            result.risk_score = min(result.high_count * 2.5 + result.medium_count * 1.0 + 1.0, 9.0) \
-                if hasattr(result, 'medium_count') else min(len(result.findings) * 1.5, 8.0)
+            medium_count = sum(1 for f in result.findings if f.severity == Severity.MEDIUM)
+            result.risk_score = min(result.high_count * 2.5 + medium_count * 1.0 + 1.0, 9.0)
         except Exception as exc:
             result.add_error(str(exc))
         result.execution_time = time.time() - t0

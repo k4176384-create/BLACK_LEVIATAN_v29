@@ -18,13 +18,17 @@ class CheckpointManager:
 
     def new_job(self, target: str) -> str:
         import uuid
-        self.job_id = str(uuid.uuid4())[:8]
+        self.job_id = str(uuid.uuid4())[:16]
         self._ckpt_path = self.base_dir / f"ckpt_{self.job_id}.json"
         data = {"job_id": self.job_id, "target": target, "created_at": time.time(), "phase_done": [], "results": {}, "context": {}}
         self._atomic_write(data)
         return self.job_id
 
     def load(self, job_id: str) -> Optional[dict]:
+        import re
+        if not re.match(r'^[a-f0-9\-]+$', job_id):
+            log.error("Checkpoint load: job_id inválido (path traversal?): %s", job_id)
+            return None
         p = self.base_dir / f"ckpt_{job_id}.json"
         if not p.exists():
             return None
@@ -75,6 +79,24 @@ class CheckpointManager:
             except: pass
         return out
 
+    def restore_state(self, job_id: str) -> Optional[dict]:
+        """Restaura el estado completo de un checkpoint para resume."""
+        data = self.load(job_id)
+        if not data:
+            return None
+        return {
+            "job_id": data.get("job_id"),
+            "target": data.get("target"),
+            "phase_done": set(data.get("phase_done", [])),
+            "results": data.get("results", {}),
+            "context": data.get("context", {}),
+            "scan_meta": data.get("scan_meta", {}),
+        }
+
     def delete(self, job_id: str):
+        import re
+        if not re.match(r'^[a-f0-9\-]+$', job_id):
+            log.error("Checkpoint delete: job_id inválido: %s", job_id)
+            return
         p=self.base_dir / f"ckpt_{job_id}.json"
         if p.exists(): p.unlink()

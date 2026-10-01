@@ -53,6 +53,7 @@ class APIKeys(BaseModel):
     github:       Optional[str] = None
     anthropic:    Optional[str] = None
     gemini:       Optional[str] = None
+    abuseipdb:    Optional[str] = None
 
     def available(self) -> list[str]:
         return [k for k, v in self.model_dump().items() if v is not None]
@@ -111,7 +112,7 @@ class StorageConfig(BaseModel):
 # ──────────────────────────────────────────────
 class DashboardConfig(BaseModel):
     mode:            Literal["tui", "phantom", "silent"] = "tui"
-    ws_host:         str  = "0.0.0.0"
+    ws_host:         str  = "127.0.0.1"
     ws_port:         int  = 8765
     refresh_rate:    float = 0.5   # segundos entre renders del TUI
     creator:         str  = "Luis Sánchez"

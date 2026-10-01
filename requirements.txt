@@ -38,11 +38,17 @@ cryptography>=42.0.0
 # ── Tor evasion (K6) ─────────────────────────────────────────────────────────
 stem>=1.8.2
 
+# ── System monitoring ─────────────────────────────────────────────────────────
+psutil>=5.9.0
+
+# ── WebSocket (K4 phantom mode) ──────────────────────────────────────────────
+websockets>=12.0
+
 # ── ML / Intel (K5) — OPCIONAL ───────────────────────────────────────────────
 # fasttext>=0.9.3      # requiere compilación — instalar manualmente si se necesita
 
 # ── Email / OSINT opcionales ──────────────────────────────────────────────────
-# holehe>=1.4.0        # pip install holehe
+# holehe>=1.4.0        # pip install holehe (requiere Python 3.11+)
 
 # ── Plugin YAML ───────────────────────────────────────────────────────────────
 PyYAML>=6.0.1

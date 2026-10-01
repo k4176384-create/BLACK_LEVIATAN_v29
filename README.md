@@ -33,7 +33,7 @@
 
 | Feature | Detalle |
 |---------|---------|
-| **36 módulos OSINT** | 10 fases: recon → deep intel → cloud infra |
+| **33 módulos OSINT** | 10 fases: recon → deep intel → cloud infra |
 | **6 Kernels especializados** | Crawler, Correlator, Storage, TUI, Intel, Evasion |
 | **Plugin system** | Hot-reload, auto-discovery, manifest YAML |
 | **DAG paralelo** | Fases con dependencias, módulos en paralelo dentro de cada fase |
@@ -68,7 +68,7 @@ BLACK LEVIATAN v29
 │   ├── k5_autonomous_intel/    ← FastText + Rust shannon_entropy/ngram
 │   └── k6_evasion_mesh/        ← ProxyPool + TorCircuits + AdaptiveBackoff
 │
-├── modules/                    ← Los 36 módulos OSINT
+├── modules/                    ← Los 33 módulos OSINT
 │   ├── base_module.py          ← BaseModule ABC, Finding, ModuleResult
 │   ├── f01_recon/              ← whois, dns, geo, robots
 │   ├── f02_discovery/          ← shodan, crtsh, subdomain_brute, port_scan
@@ -122,7 +122,7 @@ chmod +x install.sh
 
 ```bash
 # 1. Python 3.11+ requerido
-python3 --version   # debe ser 3.10+
+python3 --version   # debe ser 3.11+
 
 # 2. Entorno virtual
 python3 -m venv .venv

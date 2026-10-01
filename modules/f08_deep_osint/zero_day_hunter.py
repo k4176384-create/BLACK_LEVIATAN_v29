@@ -48,6 +48,9 @@ class ZeroDayHunter(BaseModule):
                     }
                     if version:
                         params["versionStart"] = version
+                    known_false_positives = ["gws", "gwsync", "gwscripts"]
+                    if product_name.lower() in known_false_positives:
+                        continue
 
                     try:
                         async with session.get(
@@ -76,6 +79,9 @@ class ZeroDayHunter(BaseModule):
                                             ).get("baseScore", 0.0)
                                             break
 
+                                    desc_lower = description.lower()
+                                    if product_name.lower() == "gws" and ("gwscripts" in desc_lower or "gwsync" in desc_lower or "sap crm" in desc_lower or "linux kernel" in desc_lower or "amdgpu" in desc_lower):
+                                        continue
                                     if cvss_score >= self.CVSS_THRESHOLDS["medium"]:
                                         sev = (Severity.CRITICAL if cvss_score >= 9.0 else
                                                Severity.HIGH     if cvss_score >= 7.0 else

@@ -115,6 +115,8 @@ class Orchestrator:
         self.correlator = DeepCorrelator(self._config, self._bus)
         # Suscribir correlator a findings para auto-grafo
         self._bus.subscribe("finding.new", self._on_finding_for_correlator)
+        # Suscribir a telemetry de requests
+        self._bus.subscribe("telemetry.request_sent", self._on_request_telemetry)
 
         from kernels.k6_evasion_mesh.evasion import EvasionMesh
         self.evasion = EvasionMesh(self._config, self._bus, self._state)
@@ -142,21 +144,25 @@ class Orchestrator:
     async def _on_finding_for_correlator(self, event) -> None:
         try:
             data = event.data
-            # data may be finding dict or wrapped
-            f = data.get("finding") if isinstance(data, dict) and "finding" in data else data
+            f = data.get('finding') if isinstance(data, dict) and 'finding' in data else data
             if not isinstance(f, dict): return
-            v = f.get("value",""); t = f.get("type","")
-            if t.startswith("dns_") or t=="subdomain_ct" or t=="subdomain_brute":
-                self.correlator.graph.add_entity(v, "subdomain" if "." in v else "domain")
-            elif t=="open_port":
-                ip = f.get("metadata",{}).get("ip") or v.split(":")[0]
-                if ip: self.correlator.graph.add_entity(ip, "ip")
-            elif t=="email_exposed":
-                self.correlator.graph.add_entity(v, "email")
+            v = f.get('value',''); t = f.get('type','')
+            target = self._config.target
+            if t.startswith('dns_') or t=='subdomain_ct' or t=='subdomain_brute':
+                self.correlator.register_subdomain(v, target)
+            elif t=='open_port':
+                ip = f.get('metadata',{}).get('ip') or v.split(':')[0]
+                if ip: self.correlator.register_ip(ip, target)
+            elif t=='email_exposed':
+                self.correlator.register_email(v, target)
+            elif t=='subdomain':
+                self.correlator.register_subdomain(v, target)
         except Exception:
             pass
 
-    # ── Setup de plugins ──────────────────────
+    async def _on_request_telemetry(self, event) -> None:
+        self._state.dispatch(Action.REQUEST_SENT, {"count": 1})
+
     async def setup_plugins(self) -> None:
         from plugins.loader import PluginLoader
         from pathlib import Path
@@ -252,8 +258,9 @@ class Orchestrator:
             # Hook de completado
             await self._hooks.fire(HookType.ON_COMPLETE, {"context": self._context})
 
-            # Correlator analysis final
+            # Correlator analysis final — esperar a que EventBus drene
             try:
+                await asyncio.sleep(1.0)  # Drenar eventos pendientes del bus
                 corr_analysis = await self.correlator.analyze()
                 self._context["correlator_analysis"] = corr_analysis
             except Exception as e:
@@ -309,6 +316,10 @@ class Orchestrator:
 
     async def _run_phase(self, phase_num: int) -> None:
         modules = self.loader.get_for_phase(phase_num) if self.loader else []
+        # Filter by --modules CLI flag if specified
+        cli_modules = getattr(self._config, '_cli_modules', None)
+        if cli_modules:
+            modules = [m for m in modules if m.NAME in cli_modules]
         phase_name = PHASE_NAMES.get(phase_num, f"Phase {phase_num}")
 
         self._state.dispatch(Action.START_PHASE, {
@@ -346,6 +357,22 @@ class Orchestrator:
                 if not self._vigilante.is_allowed(module.NAME):
                     log.warning("CB abierto para %s, saltando", module.NAME)
                     return None
+
+                # Enforcement: INPUT_TYPES check
+                if module.INPUT_TYPES:
+                    from core.target import TargetType
+                    target_type = self._context.get("target_info", {}).get("type", "")
+                    if target_type and hasattr(TargetType, target_type):
+                        if TargetType(target_type) not in module.INPUT_TYPES:
+                            log.debug("Módulo %s no aplica a target type %s, saltando", module.NAME, target_type)
+                            return module.skip(self._config.target, f"INPUT_TYPES: {target_type} no compatible")
+
+                # Enforcement: DEPENDENCIES check
+                if module.DEPENDENCIES:
+                    missing_deps = [d for d in module.DEPENDENCIES if d not in self._results]
+                    if missing_deps:
+                        log.debug("Módulo %s tiene dependencias faltantes: %s, saltando", module.NAME, missing_deps)
+                        return module.skip(self._config.target, f"DEPENDENCIES faltantes: {missing_deps}")
 
                 # Hook pre-módulo
                 await self._hooks.fire(HookType.PRE_MODULE, {
@@ -392,6 +419,10 @@ class Orchestrator:
                     from core.queue import QueuedTask, TaskStatus
                     t = QueuedTask(priority=5, task_id=f"{module.NAME}-{phase_num}", module=module.NAME, phase=phase_num, target=self._config.target, attempts=1, last_error="; ".join(result.errors))
                     t.status = TaskStatus.FAILED
+                    try:
+                        self._dlq.store(t)
+                    except Exception as dlq_err:
+                        log.debug("DLQ store failed: %s", dlq_err)
 
                 # Hook post-módulo
                 await self._hooks.fire(HookType.POST_MODULE, {

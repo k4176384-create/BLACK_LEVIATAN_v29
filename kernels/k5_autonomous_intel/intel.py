@@ -374,13 +374,28 @@ class AutonomousIntel:
 
         final = min(base_score, 10.0)
 
-        # Auto-retune para la próxima ejecución
+        # Auto-retune: poblar historial desde findings del scan actual
         if self._config.intel.scorecard_retune:
+            self._bootstrap_scorecard_from_findings(results)
             self._scorecard.retune()
 
         log.info("K5 Risk Score final: %.2f (findings: %d, critical: %d)",
                  final, total_findings, critical_count)
         return round(final, 2)
+
+    def _bootstrap_scorecard_from_findings(self, results: dict) -> None:
+        """Poblar historial de ScorecardMem desde findings del scan actual para retune."""
+        from modules.base_module import Severity
+        for module_result in results.values():
+            for finding in module_result.findings:
+                if finding.severity.value >= Severity.HIGH.value:
+                    # Finding de alta severidad → confirmed=True
+                    features = URLFeatures(url=finding.value[:200])
+                    self._scorecard.record(features, 8.0, True)
+                elif finding.severity.value <= Severity.LOW.value:
+                    # Finding de baja severidad → confirmed=False (posible falso positivo)
+                    features = URLFeatures(url=finding.value[:200])
+                    self._scorecard.record(features, 2.0, False)
 
     # ── LLM summary (opcional) ────────────────
     async def generate_executive_summary(self, scan_data: dict) -> str:

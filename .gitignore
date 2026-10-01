@@ -14,3 +14,17 @@ logs/*.log
 *.so
 *.dylib
 kernels/*/rust_core/target/
+
+# Estado local de Hermes
+.hermes/
+
+# Base de datos local
+database/*.db
+database/*.sqlite
+database/*.sqlite3
+
+# Checkpoints generados
+data/checkpoints/
+
+# Logs generados
+logs/*

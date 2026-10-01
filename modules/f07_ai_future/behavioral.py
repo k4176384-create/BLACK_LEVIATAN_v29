@@ -27,8 +27,11 @@ class BehavioralAnalysis(BaseModule):
             if whois_data and geo_data:
                 registrant_country = whois_data.get("country", "").upper()
                 server_countries   = {v.get("country", "") for v in geo_data.values()}
+                country_map = {"US": "United States", "GB": "United Kingdom", "DE": "Germany", "FR": "France", "ES": "Spain", "IT": "Italy", "CA": "Canada", "AU": "Australia", "JP": "Japan", "CN": "China"}
+                reg_full = country_map.get(registrant_country, registrant_country)
                 if (registrant_country and server_countries and
                         registrant_country not in server_countries and
+                        reg_full not in server_countries and
                         registrant_country not in ("", "N/A")):
                     anomalies.append({
                         "type":    "geo_mismatch",

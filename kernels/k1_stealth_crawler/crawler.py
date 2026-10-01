@@ -128,7 +128,6 @@ class StealthCrawler:
             connector = TCPConnector(
                 limit=50,
                 limit_per_host=5,
-                ssl=False,
                 enable_cleanup_closed=True,
             )
             timeout = ClientTimeout(total=30, connect=10)
@@ -166,6 +165,13 @@ class StealthCrawler:
         await self._bucket.acquire()
 
         proxy = self._get_proxy()
+
+        # Incrementar contador de requests
+        await self._bus.publish("telemetry.request_sent", {
+            "module": module_name,
+            "url": url,
+            "host": host,
+        })
 
         # Intento 1: aiohttp
         result = await self._fetch_aiohttp(url, proxy)

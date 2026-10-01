@@ -127,6 +127,15 @@ class ImmortalStorage:
         try:
             self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_dedup ON findings(scan_id, type, value)")
         except: pass
+        # Dedup module_results: clean stale duplicates before creating unique index
+        try:
+            self._conn.execute("""
+                DELETE FROM module_results WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM module_results GROUP BY scan_id, module_name
+                )
+            """)
+            self._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_module_results_dedup ON module_results(scan_id, module_name)")
+        except: pass
         self._conn.commit()
 
     def _init_duckdb(self) -> None:
@@ -168,7 +177,7 @@ class ImmortalStorage:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._conn.execute(
-                    """INSERT INTO module_results
+                    """INSERT OR IGNORE INTO module_results
                        (scan_id, module_name, phase, target, risk_score, exec_time,
                         skipped, skip_reason, metadata, errors)
                        VALUES(?,?,?,?,?,?,?,?,?,?)""",
@@ -297,7 +306,7 @@ class ImmortalStorage:
         except Exception as exc:
             log.debug("DuckDB sync alternativo: %s", exc)
             # Fallback: leer desde SQLite y escribir en DuckDB
-            for table in ["findings", "module_results"]:
+            for table in ["findings", "module_results", "scans"]:
                 rows = self._conn.execute(f"SELECT * FROM {table}").fetchall()
                 if rows:
                     cols = [d[0] for d in self._conn.execute(
@@ -325,6 +334,13 @@ class ImmortalStorage:
     async def close(self) -> None:
         if self._sync_task:
             self._sync_task.cancel()
+        # Flush final SQLite → DuckDB antes de cerrar
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._sync_to_duckdb)
+            log.debug("K3 flush final: SQLite → DuckDB completado")
+        except Exception as exc:
+            log.error("K3 flush final error: %s", exc)
         if self._conn:
             self._conn.close()
         if self._duck:

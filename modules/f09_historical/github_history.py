@@ -106,8 +106,6 @@ class GithubHistory(BaseModule):
                                 ) as diff_resp:
                                     if diff_resp.status == 200:
                                         diff_data = await diff_resp.json()
-                                        for file in diff_resp.json if callable(diff_resp.json) else []:
-                                            patch = ""
                                         # Analizar archivos del commit
                                         files = diff_data.get("files", [])
                                         for f in files[:10]:

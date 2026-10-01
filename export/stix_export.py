@@ -5,14 +5,18 @@ from pathlib import Path
 
 class StixExporter:
     async def export(self, report: dict, output_dir: Path) -> Path:
+        output_dir.mkdir(parents=True, exist_ok=True)
         t   = report.get("target","unknown").replace("/","_")
         fn  = output_dir / f"bl_{t}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.stix.json"
         now = datetime.utcnow().isoformat()+"Z"
         objs = [{"type":"report","spec_version":"2.1","id":f"report--{uuid.uuid4()}",
                  "created":now,"modified":now,"name":f"BL v29 — {report.get('target','')}",
                  "report_types":["threat-report"],"published":now,"object_refs":[]}]
-        for phase in report.get("phases",[]):
-            for fi in phase.get("findings",[]):
+        all_findings = report.get("findings", [])
+        if not all_findings:
+            for phase in report.get("phases",[]):
+                all_findings.extend(phase.get("findings",[]))
+        for fi in all_findings:
                 if fi.get("severity","INFO") in ("CRITICAL","HIGH","MEDIUM"):
                     oid = f"indicator--{uuid.uuid4()}"
                     objs[0]["object_refs"].append(oid)

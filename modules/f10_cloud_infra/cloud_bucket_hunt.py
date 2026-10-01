@@ -53,16 +53,18 @@ class CloudBucketHunt(BaseModule):
                                         tags=["s3", "cloud", "misconfiguration"],
                                     )
                                 elif resp.status == 403:
-                                    # Bucket existe pero acceso restringido
-                                    result.add_finding(
-                                        type="s3_bucket_exists",
-                                        value=url,
-                                        severity=Severity.LOW,
-                                        confidence=0.85,
-                                        metadata={"bucket": name, "provider": "AWS S3",
-                                                  "status": "access_denied"},
-                                        tags=["s3", "cloud"],
-                                    )
+                                    # Bucket existe pero acceso restringido — verificar ownership
+                                    target_base = target.split(".")[0].lower()
+                                    if target_base in name.lower():
+                                        result.add_finding(
+                                            type="s3_bucket_exists",
+                                            value=url,
+                                            severity=Severity.LOW,
+                                            confidence=0.85,
+                                            metadata={"bucket": name, "provider": "AWS S3",
+                                                      "status": "access_denied"},
+                                            tags=["s3", "cloud"],
+                                        )
                     except (aiohttp.ClientError, asyncio.TimeoutError):
                         pass
 

@@ -119,6 +119,17 @@ async def run_scan(args: argparse.Namespace) -> int:
     if args.plugin_dir:
         config.plugins.plugin_dirs = [Path(args.plugin_dir)]
 
+    # Propagar flags CLI a config
+    if args.timeout:
+        config.dag.module_timeout = float(args.timeout)
+    if args.concurrency:
+        config.dag.max_concurrency = args.concurrency
+        config.dag.parallel_workers = args.concurrency
+    if args.modules:
+        config._cli_modules = [m.strip() for m in args.modules.split(",")]
+    else:
+        config._cli_modules = None
+
     # CLI output_dir debe propagarse a config.export.output_dir para que orchestrator exporte ahí
     if args.output_dir:
         config.export.output_dir = Path(args.output_dir)
@@ -302,7 +313,7 @@ def main() -> None:
         return
 
     if args.doctor:
-        import subprocess, sys
+        import subprocess
         sys.exit(subprocess.call([sys.executable, "tools/doctor.py"]))
 
     if args.health:
@@ -349,12 +360,38 @@ def main() -> None:
         return
 
     if args.resume:
-        # Resume stub: muestra checkpoint
         from core.checkpoint import CheckpointManager
+        from rich.console import Console
         cm=CheckpointManager()
-        data=cm.load(args.resume)
-        print(f"Checkpoint {args.resume}: {data}")
-        return
+        state = cm.restore_state(args.resume)
+        if not state:
+            print(f"Checkpoint {args.resume} no encontrado o corrupto")
+            return 1
+        console=Console()
+        console.print(f"[bold magenta]BLACK LEVIATAN v29 — Resume Job {args.resume}[/]")
+        console.print(f"  Target: {state['target']}")
+        console.print(f"  Fases completadas: {sorted(state['phase_done'])}")
+        console.print(f"  Context keys: {list(state['context'].keys())[:10]}")
+        return 0
+
+    if args.retry_failed:
+        from core.checkpoint import CheckpointManager
+        from core.queue import PersistentDLQ
+        from rich.console import Console
+        console=Console()
+        console.print(f"[bold magenta]BLACK LEVIATAN v29 — Retry Failed Job {args.retry_failed}[/]")
+        cm=CheckpointManager()
+        state = cm.restore_state(args.retry_failed)
+        if not state:
+            console.print(f"[red]Checkpoint {args.retry_failed} no encontrado[/]")
+            return 1
+        dlq = PersistentDLQ()
+        items = dlq.list(100)
+        failed_for_job = [i for i in items if i.get("target") == state["target"]]
+        console.print(f"  DLQ items para target: {len(failed_for_job)}")
+        for item in failed_for_job[:10]:
+            console.print(f"    {item.get('module','?')} | {item.get('error','?')[:60]}")
+        return 0
 
     sys.exit(asyncio.run(run_scan(args)))
 

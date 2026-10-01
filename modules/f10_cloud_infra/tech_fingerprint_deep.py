@@ -119,8 +119,48 @@ class TechFingerprintDeep(BaseModule):
                         if scheme == "https":
                             continue   # Intentar http
 
-            result.risk_score = min(result.high_count * 2 + result.medium_count_val * 1.0, 8.0) \
-                if False else min(result.high_count * 2 + len(result.findings) * 0.3, 8.0)
+            # Check HTTP→HTTPS redirect separado si https funcionó
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"http://{target}",
+                        timeout=aiohttp.ClientTimeout(total=10),
+                        allow_redirects=False,
+                    ) as resp:
+                        location = resp.headers.get("location", "")
+                        if resp.status in (301, 302, 307, 308):
+                            if "https" in location.lower():
+                                pass  # Redirect correcto a HTTPS
+                            elif location:
+                                # Redirect a otro HTTP, seguir la cadena
+                                try:
+                                    async with session.get(
+                                        location,
+                                        timeout=aiohttp.ClientTimeout(total=10),
+                                        allow_redirects=True,
+                                    ) as resp2:
+                                        if "https" not in str(resp2.url).lower():
+                                            result.add_finding(
+                                                type="no_https_redirect",
+                                                value="No redirige HTTP → HTTPS",
+                                                severity=Severity.HIGH,
+                                                confidence=0.95,
+                                                tags=["https", "redirect"],
+                                            )
+                                except Exception:
+                                    pass
+                        elif resp.status < 400 and "https" not in str(resp.url).lower():
+                            result.add_finding(
+                                type="no_https_redirect",
+                                value="No redirige HTTP → HTTPS",
+                                severity=Severity.HIGH,
+                                confidence=0.95,
+                                tags=["https", "redirect"],
+                            )
+            except Exception:
+                pass
+
+            result.risk_score = min(result.high_count * 2 + len(result.findings) * 0.3, 8.0)
         except Exception as exc:
             result.add_error(str(exc))
         result.execution_time = time.time() - t0

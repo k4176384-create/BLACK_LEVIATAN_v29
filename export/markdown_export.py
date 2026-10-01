@@ -1,4 +1,5 @@
 from __future__ import annotations
+import html as html_mod
 from datetime import datetime
 from pathlib import Path
 
@@ -6,6 +7,7 @@ SEV_ICONS = {"CRITICAL":"🔴","HIGH":"🟠","MEDIUM":"🟡","LOW":"🟢","INFO"
 
 class MarkdownExporter:
     async def export(self, report: dict, output_dir: Path) -> Path:
+        output_dir.mkdir(parents=True, exist_ok=True)
         t  = report.get("target","unknown").replace("/","_")
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fn = output_dir / f"bl_{t}_{ts}.md"
@@ -48,7 +50,7 @@ class MarkdownExporter:
             vs = f_.get("validation_state","")
             lim = f_.get("limitations","")
             extra = f" _( {vs} conf:{f_.get('confidence')} )_" if vs else ""
-            lines.append(f"- {icon} **{f_.get('type','?')}**: {f_.get('value','?')}{extra}")
+            lines.append(f"- {icon} **{html_mod.escape(str(f_.get('type','?')))}**: {html_mod.escape(str(f_.get('value','?')))}{extra}")
             if lim:
                 lines.append(f"  > _Limitación: {lim}_")
         # Also per-phase summary

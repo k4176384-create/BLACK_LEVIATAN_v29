@@ -206,7 +206,9 @@ class EventBus:
             to_remove = []
 
             if not matched:
-                self._dead_letter.append(event)
+                # No enviar a DLQ eventos de telemetría o debugging
+                if not event.topic.startswith(("dashboard.", "telemetry.", "debug.")):
+                    self._dead_letter.append(event)
             else:
                 for sub in matched:
                     try:

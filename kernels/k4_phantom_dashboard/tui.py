@@ -297,8 +297,21 @@ class PhantomDashboard:
         try:
             import websockets
             from websockets.server import serve
+            import secrets
+
+            ws_token = secrets.token_urlsafe(32)
+            log.info("K4 Phantom WebSocket token: %s", ws_token)
 
             async def handler(ws):
+                try:
+                    first_msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    if first_msg != ws_token:
+                        await ws.close(4001, "Unauthorized")
+                        return
+                except asyncio.TimeoutError:
+                    await ws.close(4001, "Token timeout")
+                    return
+
                 async def sender():
                     while True:
                         await asyncio.sleep(1.0)
@@ -314,7 +327,7 @@ class PhantomDashboard:
                 self._config.dashboard.ws_host,
                 self._config.dashboard.ws_port,
             ):
-                log.info("K4 Phantom WebSocket escuchando en %s:%d",
+                log.info("K4 Phantom WebSocket escuchando en %s:%d (auth requerido)",
                          self._config.dashboard.ws_host,
                          self._config.dashboard.ws_port)
                 await asyncio.Future()   # run forever

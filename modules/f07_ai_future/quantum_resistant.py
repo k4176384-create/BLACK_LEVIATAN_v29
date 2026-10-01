@@ -83,9 +83,12 @@ class QuantumResistant(BaseModule):
                         )
 
                     # Self-signed
-                    issuer  = cert.get("issuer", {})
-                    subject = cert.get("subject", {})
-                    if issuer == subject:
+                    issuer  = cert.get("issuer", ())
+                    subject = cert.get("subject", ())
+                    known_cas = ["Google Trust Services", "Let's Encrypt", "DigiCert", "Comodo", "GlobalSign", "Sectigo", "GoDaddy", "Amazon"]
+                    issuer_str = str(issuer).lower()
+                    is_known_ca = any(ca.lower() in issuer_str for ca in known_cas)
+                    if not is_known_ca and issuer == subject:
                         result.add_finding(
                             type="self_signed_cert",
                             value="Certificado autofirmado detectado",
